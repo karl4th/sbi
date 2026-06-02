@@ -29,6 +29,13 @@ class MemoryConfig:
     compression_threshold: int = 20
     # How many neighbors to retrieve during search
     top_k: int = 8
+    # How many nearest neighbors to connect in the Hebbian graph
+    graph_top_k: int = 3
+    # Diagnostic bias added to the retrieved answer token at ANSWER positions.
+    # Set to 0.0 to disable direct logit injection.
+    memory_logit_bias: float = 0.0
+    # Token ID of the ANSWER separator in data.babi.tokenizer.
+    answer_marker_token_id: int = 4
     # Diagnostic mode: disable learned StateFingerprintLayer and address memory
     # with a deterministic bag-of-tokens fingerprint from input_ids.
     use_learned_fingerprint: bool = True

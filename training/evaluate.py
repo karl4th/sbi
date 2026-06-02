@@ -156,6 +156,9 @@ def main(
             min_confidence=mm["min_confidence"],
             compression_threshold=mm["compression_threshold"],
             top_k=mm["top_k"],
+            graph_top_k=mm.get("graph_top_k", 3),
+            memory_logit_bias=mm.get("memory_logit_bias", 0.0),
+            answer_marker_token_id=mm.get("answer_marker_token_id", 4),
             use_learned_fingerprint=mm.get("use_learned_fingerprint", True),
         ),
     )

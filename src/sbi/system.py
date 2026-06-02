@@ -97,13 +97,18 @@ class SBISystem(nn.Module):
             query_fp_np = query_fp.cpu().numpy()
 
         # Retrieve memories relevant to each input in the batch.
-        memory_tokens = self._build_memory_tokens(query_fp_np, input_ids.device)
+        memory_tokens, memory_answer_tokens = self._build_memory_tokens(
+            query_fp_np, input_ids.device
+        )
 
         # Pass 2 — full forward with memory context, gradients flow here
         logits, _ = self.reasoning_core(
             input_ids,
             memory_tokens=memory_tokens,
             return_hidden_state=True,
+        )
+        logits = self._apply_memory_logit_bias(
+            input_ids, logits, memory_answer_tokens
         )
 
         return logits, query_fp_np
@@ -112,7 +117,7 @@ class SBISystem(nn.Module):
         self,
         query_fp_np: np.ndarray,
         device: torch.device,
-    ) -> Optional[torch.Tensor]:
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Retrieve relevant memories and build memory token matrix.
 
@@ -121,9 +126,10 @@ class SBISystem(nn.Module):
           - Answer embeddings:      encode 'what the answer was'
         """
         if self.episodic_memory.size() == 0:
-            return None
+            return None, None
 
         memory_vectors = []
+        answer_tokens = []
         any_hit = False
 
         for query_fp in query_fp_np:
@@ -142,22 +148,54 @@ class SBISystem(nn.Module):
                         device=device,
                     )
                 )
+                answer_tokens.append(-1)
                 continue
 
             any_hit = True
             entry = entries[0]
+            answer_tokens.append(entry.answer_token)
 
             # Hebbian update only on confident retrievals (not every step)
             if entry.confidence > 0.75:
-                self.search_layer.record_coactivation(entries)
+                self.search_layer.record_coactivation(
+                    entries[: self.config.memory.graph_top_k]
+                )
 
             ans_tensor = torch.tensor([entry.answer_token], dtype=torch.long, device=device)
             memory_vectors.append(self.reasoning_core.token_emb(ans_tensor).squeeze(0))
 
         if not any_hit:
-            return None
+            return None, None
 
-        return torch.stack(memory_vectors, dim=0).unsqueeze(1)   # (B, 1, d_model)
+        return (
+            torch.stack(memory_vectors, dim=0).unsqueeze(1),   # (B, 1, d_model)
+            torch.tensor(answer_tokens, dtype=torch.long, device=device),
+        )
+
+    def _apply_memory_logit_bias(
+        self,
+        input_ids: torch.Tensor,
+        logits: torch.Tensor,
+        memory_answer_tokens: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Directly bias logits toward retrieved memory answers at ANSWER positions."""
+        bias = self.config.memory.memory_logit_bias
+        if bias <= 0 or memory_answer_tokens is None:
+            return logits
+
+        answer_positions = input_ids == self.config.memory.answer_marker_token_id
+        if not answer_positions.any():
+            return logits
+
+        biased_logits = logits.clone()
+        for batch_idx, answer_token in enumerate(memory_answer_tokens.tolist()):
+            if answer_token < 0:
+                continue
+            positions = answer_positions[batch_idx].nonzero(as_tuple=True)[0]
+            if len(positions) == 0:
+                continue
+            biased_logits[batch_idx, positions, answer_token] += bias
+        return biased_logits
 
     def _input_fingerprint(self, input_ids: torch.Tensor) -> torch.Tensor:
         """
