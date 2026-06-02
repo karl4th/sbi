@@ -27,6 +27,9 @@ env/
 .ipynb_checkpoints/
 *.ipynb_checkpoints
 
+# Downloaded datasets
+data/babi/.cache/
+
 # Data & models
 experiments/checkpoints/
 experiments/results/*.json
