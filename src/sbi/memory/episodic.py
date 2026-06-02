@@ -7,10 +7,11 @@ import time
 
 @dataclass
 class MemoryEntry:
-    state_signature: np.ndarray   # fingerprint vector (128-dim)
+    state_signature: np.ndarray   # fingerprint of the INPUT query state
     action: str                    # what reasoning step was taken
     outcome: str                   # result of that step
     confidence: float              # how confident the system was
+    answer_token: int = -1         # token ID of the correct answer (used for hint injection)
     timestamp: float = field(default_factory=time.time)
     usage_count: int = 0
     entry_id: int = -1

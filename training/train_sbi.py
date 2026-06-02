@@ -1,9 +1,10 @@
 """
-Train the SBI system: Reasoning Core + State Fingerprint + Memory Injection.
-Compared against the baseline to validate H1 and H2.
+Train the SBI system with two-pass memory injection.
 
-Key difference from baseline: retrieved memory fingerprints are projected and
-prepended as context tokens before the transformer forward pass (lag-1 retrieval).
+Key difference from baseline:
+  - Pass 1 (no_grad): get query fingerprint from current input
+  - Retrieve semantically relevant memories (fingerprint + answer token)
+  - Pass 2 (grad): forward with injected memory context → loss → backprop
 """
 
 import sys
@@ -21,12 +22,24 @@ from tqdm import tqdm
 from sbi.system import SBISystem
 from sbi.core.config import ReasoningConfig, MemoryConfig, SBIConfig
 from data.babi.dataset import BabiDataset
+from data.babi.tokenizer import PAD_ID
 
 
 def get_lr(step: int, warmup_steps: int, lr: float) -> float:
     if step < warmup_steps:
         return lr * step / warmup_steps
     return lr
+
+
+def extract_answer_token(target_ids: torch.Tensor) -> int:
+    """
+    Extract the first non-PAD token from target_ids of the first batch item.
+    This is the answer word the model should have predicted.
+    """
+    nonzero = (target_ids[0] != PAD_ID).nonzero(as_tuple=True)[0]
+    if len(nonzero) > 0:
+        return target_ids[0, nonzero[0]].item()
+    return -1
 
 
 def evaluate(system: SBISystem, loader: DataLoader, device: torch.device) -> dict:
@@ -37,38 +50,35 @@ def evaluate(system: SBISystem, loader: DataLoader, device: torch.device) -> dic
     total_answer_tokens = 0
     retrieval_hits = 0
 
-    prev_fp = None
-
     with torch.no_grad():
         for input_ids, target_ids in loader:
-            input_ids = input_ids.to(device)
+            input_ids  = input_ids.to(device)
             target_ids = target_ids.to(device)
 
-            logits, fp_numpy = system(input_ids, prev_fingerprint=prev_fp)
-            prev_fp = fp_numpy
+            logits, query_fp = system(input_ids)
 
             loss = nn.functional.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 target_ids.view(-1),
-                ignore_index=0,
+                ignore_index=PAD_ID,
             )
             total_loss += loss.item()
             n_batches += 1
 
             preds = logits.argmax(dim=-1)
-            mask = target_ids != 0
-            correct += ((preds == target_ids) & mask).sum().item()
+            mask  = target_ids != PAD_ID
+            correct             += ((preds == target_ids) & mask).sum().item()
             total_answer_tokens += mask.sum().item()
 
-            if system.episodic_memory.size() > 0 and prev_fp is not None:
-                entries = system.episodic_memory.search(prev_fp[0], top_k=1)
+            if system.episodic_memory.size() > 0:
+                entries = system.retrieve(query_fp)
                 if entries:
                     retrieval_hits += 1
 
     system.train()
     return {
-        "eval_loss": total_loss / max(1, n_batches),
-        "answer_acc": correct / max(1, total_answer_tokens),
+        "eval_loss":      total_loss / max(1, n_batches),
+        "answer_acc":     correct / max(1, total_answer_tokens),
         "retrieval_rate": retrieval_hits / max(1, n_batches),
         **system.memory_stats(),
     }
@@ -129,7 +139,7 @@ def train(config_path: str):
     system = SBISystem(sbi_config).to(device)
     print(f"Parameters: {system.num_parameters():,}")
 
-    tc = cfg["training"]
+    tc  = cfg["training"]
     train_loader = DataLoader(train_dataset, batch_size=tc["batch_size"], shuffle=True, num_workers=2)
     eval_loader  = DataLoader(eval_dataset,  batch_size=tc["batch_size"], num_workers=2)
 
@@ -142,7 +152,6 @@ def train(config_path: str):
 
     step = 0
     best_eval_loss = float("inf")
-    prev_fp = None          # lag-1 fingerprint for memory injection
 
     system.train()
     pbar = tqdm(total=tc["max_steps"])
@@ -159,13 +168,13 @@ def train(config_path: str):
             input_ids  = input_ids.to(device)
             target_ids = target_ids.to(device)
 
-            # Forward with memory context from previous step
-            logits, fp_numpy = system(input_ids, prev_fingerprint=prev_fp)
+            # Two-pass forward (pass 1 inside system.forward is no_grad)
+            logits, query_fp_np = system(input_ids)
 
             loss = nn.functional.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 target_ids.view(-1),
-                ignore_index=0,
+                ignore_index=PAD_ID,
             )
 
             optimizer.zero_grad()
@@ -173,15 +182,12 @@ def train(config_path: str):
             torch.nn.utils.clip_grad_norm_(system.parameters(), tc["grad_clip"])
             optimizer.step()
 
-            # Update lag-1 fingerprint for next step
-            prev_fp = fp_numpy
-
-            # Write to episodic memory if confident enough
-            confidence = float(torch.exp(-loss).item())
+            # Store experience: query fingerprint + correct answer token
+            confidence   = float(torch.exp(-loss).item())
+            answer_token = extract_answer_token(target_ids.cpu())
             system.remember(
-                fingerprint=fp_numpy,
-                action=f"step_{step}",
-                outcome="correct" if confidence > 0.8 else "partial",
+                query_fp_np=query_fp_np,
+                answer_token=answer_token,
                 confidence=confidence,
             )
 

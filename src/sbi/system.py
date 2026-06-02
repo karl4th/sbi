@@ -13,11 +13,7 @@ from .search.search_layer import SearchLayer
 
 
 class MemoryInjectionLayer(nn.Module):
-    """
-    Projects retrieved memory fingerprints (fingerprint_dim)
-    into the transformer's residual stream (d_model) so they can
-    be prepended as context tokens.
-    """
+    """Projects retrieved memory fingerprints into the transformer residual stream."""
 
     def __init__(self, fingerprint_dim: int, d_model: int):
         super().__init__()
@@ -35,20 +31,18 @@ class SBISystem(nn.Module):
     """
     Search-Based Intelligence — full system.
 
-    Memory injection flow (lag-1):
-      step t-1: forward → get fingerprint_t-1
-      step t  : retrieve using fingerprint_t-1
-               → project retrieved fingerprints → memory_tokens
-               → prepend memory_tokens to input
-               → forward with memory context
-               → get fingerprint_t (for step t+1)
+    Two-pass memory injection:
+      Pass 1 (no_grad): input → transformer → fingerprint  → query memory
+      Pass 2 (grad):    input + memory_tokens → transformer → logits → loss
+
+    Memory stores (query_fingerprint, answer_token) so retrieved entries
+    carry actual semantic hints, not just past training state snapshots.
     """
 
     def __init__(self, config: SBIConfig):
         super().__init__()
         self.config = config
 
-        # Trainable components (gradient descent)
         self.reasoning_core = ReasoningCore(config.reasoning)
         self.fingerprint_layer = StateFingerprintLayer(
             hidden_dim=config.reasoning.hidden_dim,
@@ -59,7 +53,6 @@ class SBISystem(nn.Module):
             d_model=config.reasoning.d_model,
         )
 
-        # Memory components (Hebbian updates, no backprop)
         self.episodic_memory = EpisodicMemory(
             fingerprint_dim=config.memory.fingerprint_dim,
             max_size=config.memory.max_memory_size,
@@ -82,73 +75,99 @@ class SBISystem(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        prev_fingerprint: Optional[np.ndarray] = None,
     ) -> Tuple[torch.Tensor, np.ndarray]:
         """
-        Args:
-            input_ids:        (B, T)
-            prev_fingerprint: (B, fingerprint_dim) numpy — fingerprint from
-                              the previous step used to retrieve memory context.
-                              Pass None at the very first step.
+        Two-pass forward.
 
         Returns:
-            logits:      (B, T, vocab_size)
-            fingerprint: (B, fingerprint_dim) numpy — use as prev_fingerprint next step
+            logits:       (B, T, vocab_size)
+            query_fp_np:  (B, fingerprint_dim) — fingerprint of the INPUT query,
+                          used for storing in memory (not the output state).
         """
-        memory_tokens = self._build_memory_tokens(prev_fingerprint, input_ids.device)
-        if memory_tokens is not None:
-            memory_tokens = memory_tokens.expand(input_ids.shape[0], -1, -1)
+        B = input_ids.shape[0]
 
-        logits, hidden = self.reasoning_core(
+        # Pass 1 — no grad, get query fingerprint for the current input
+        with torch.no_grad():
+            _, hidden_nograd = self.reasoning_core(input_ids, return_hidden_state=True)
+            query_fp = self.fingerprint_layer(hidden_nograd)
+            query_fp_np = query_fp.cpu().numpy()
+
+        # Retrieve memories relevant to this input
+        memory_tokens = self._build_memory_tokens(query_fp_np, input_ids.device)
+        if memory_tokens is not None:
+            memory_tokens = memory_tokens.expand(B, -1, -1)
+
+        # Pass 2 — full forward with memory context, gradients flow here
+        logits, _ = self.reasoning_core(
             input_ids,
             memory_tokens=memory_tokens,
             return_hidden_state=True,
         )
-        fingerprint = self.fingerprint_layer(hidden)
-        fp_numpy = fingerprint.detach().cpu().numpy()
-        return logits, fp_numpy
+
+        return logits, query_fp_np
 
     def _build_memory_tokens(
         self,
-        prev_fingerprint: Optional[np.ndarray],
+        query_fp_np: np.ndarray,
         device: torch.device,
     ) -> Optional[torch.Tensor]:
-        """Retrieve entries and project to d_model. Returns None if memory is empty."""
-        if prev_fingerprint is None or self.episodic_memory.size() == 0:
+        """
+        Retrieve relevant memories and build memory token matrix.
+
+        Injects two types of context:
+          - Projected fingerprints: encode 'what the situation looked like'
+          - Answer embeddings:      encode 'what the answer was'
+        """
+        if self.episodic_memory.size() == 0:
             return None
 
-        entries = self.search_layer.search(prev_fingerprint[0])
+        entries = self.search_layer.search(query_fp_np[0])
         if not entries:
             return None
 
         self.search_layer.record_coactivation(entries)
 
-        fp_array = np.stack([e.state_signature for e in entries])          # (K, fp_dim)
+        # Fingerprint projections — (K, d_model)
+        fp_array = np.stack([e.state_signature for e in entries])
         fp_tensor = torch.tensor(fp_array, dtype=torch.float32, device=device)
-        mem_vectors = self.memory_injection(fp_tensor)                      # (K, d_model)
-        return mem_vectors.unsqueeze(0)                                     # (1, K, d_model)
+        mem_vectors = self.memory_injection(fp_tensor)
 
-    def retrieve(self, fingerprint: np.ndarray) -> List[MemoryEntry]:
-        entries = self.search_layer.search(fingerprint[0])
-        self.search_layer.record_coactivation(entries)
-        return entries
+        # Answer hint embeddings — inject answer tokens from retrieved memories
+        answer_ids = [e.answer_token for e in entries if e.answer_token >= 0]
+        if answer_ids:
+            ans_tensor = torch.tensor(answer_ids, dtype=torch.long, device=device)
+            # Reuse the transformer's own token embedding — same semantic space
+            ans_embs = self.reasoning_core.token_emb(ans_tensor)   # (num_hints, d_model)
+            mem_vectors = torch.cat([mem_vectors, ans_embs], dim=0)
+
+        return mem_vectors.unsqueeze(0)   # (1, K + num_hints, d_model)
 
     def remember(
         self,
-        fingerprint: np.ndarray,
-        action: str,
-        outcome: str,
+        query_fp_np: np.ndarray,
+        answer_token: int,
         confidence: float,
     ):
+        """
+        Store a (query_fingerprint, answer_token) experience in episodic memory.
+        query_fp_np is the INPUT fingerprint — makes retrieval coherent with querying.
+        """
         if confidence < self.config.memory.min_confidence:
             return
+
         entry = MemoryEntry(
-            state_signature=fingerprint[0],
-            action=action,
-            outcome=outcome,
+            state_signature=query_fp_np[0],
+            action="reasoning",
+            outcome="correct" if confidence > 0.8 else "partial",
             confidence=confidence,
+            answer_token=answer_token,
         )
         self.episodic_memory.write(entry)
+
+    def retrieve(self, query_fp_np: np.ndarray) -> List[MemoryEntry]:
+        entries = self.search_layer.search(query_fp_np[0])
+        self.search_layer.record_coactivation(entries)
+        return entries
 
     def step_housekeeping(self):
         self._step += 1
