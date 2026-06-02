@@ -96,6 +96,8 @@ class SBISystem(nn.Module):
             fingerprint: (B, fingerprint_dim) numpy — use as prev_fingerprint next step
         """
         memory_tokens = self._build_memory_tokens(prev_fingerprint, input_ids.device)
+        if memory_tokens is not None:
+            memory_tokens = memory_tokens.expand(input_ids.shape[0], -1, -1)
 
         logits, hidden = self.reasoning_core(
             input_ids,
