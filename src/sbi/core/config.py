@@ -29,6 +29,9 @@ class MemoryConfig:
     compression_threshold: int = 20
     # How many neighbors to retrieve during search
     top_k: int = 8
+    # Diagnostic mode: disable learned StateFingerprintLayer and address memory
+    # with a deterministic bag-of-tokens fingerprint from input_ids.
+    use_learned_fingerprint: bool = True
 
 
 @dataclass

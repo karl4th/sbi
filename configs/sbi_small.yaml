@@ -15,6 +15,7 @@ memory:
   min_confidence: 0.6
   compression_threshold: 200
   top_k: 8
+  use_learned_fingerprint: false
 
 training:
   batch_size: 64

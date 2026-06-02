@@ -31,15 +31,13 @@ def get_lr(step: int, warmup_steps: int, lr: float) -> float:
     return lr
 
 
-def extract_answer_token(target_ids: torch.Tensor) -> int:
-    """
-    Extract the first non-PAD token from target_ids of the first batch item.
-    This is the answer word the model should have predicted.
-    """
-    nonzero = (target_ids[0] != PAD_ID).nonzero(as_tuple=True)[0]
-    if len(nonzero) > 0:
-        return target_ids[0, nonzero[0]].item()
-    return -1
+def extract_answer_tokens(target_ids: torch.Tensor) -> list[int]:
+    """Extract the first non-PAD target token for each batch item."""
+    answer_tokens = []
+    for row in target_ids:
+        nonzero = (row != PAD_ID).nonzero(as_tuple=True)[0]
+        answer_tokens.append(row[nonzero[0]].item() if len(nonzero) > 0 else -1)
+    return answer_tokens
 
 
 def evaluate(system: SBISystem, loader: DataLoader, device: torch.device) -> dict:
@@ -49,6 +47,7 @@ def evaluate(system: SBISystem, loader: DataLoader, device: torch.device) -> dic
     correct = 0
     total_answer_tokens = 0
     retrieval_hits = 0
+    retrieval_queries = 0
 
     with torch.no_grad():
         for input_ids, target_ids in loader:
@@ -71,15 +70,16 @@ def evaluate(system: SBISystem, loader: DataLoader, device: torch.device) -> dic
             total_answer_tokens += mask.sum().item()
 
             if system.episodic_memory.size() > 0:
-                entries = system.retrieve(query_fp)
-                if entries:
-                    retrieval_hits += 1
+                for sample_fp in query_fp:
+                    entries = system.episodic_memory.search(sample_fp, top_k=1)
+                    retrieval_hits += int(bool(entries))
+                    retrieval_queries += 1
 
     system.train()
     return {
         "eval_loss":      total_loss / max(1, n_batches),
         "answer_acc":     correct / max(1, total_answer_tokens),
-        "retrieval_rate": retrieval_hits / max(1, n_batches),
+        "retrieval_rate": retrieval_hits / max(1, retrieval_queries),
         **system.memory_stats(),
     }
 
@@ -133,6 +133,7 @@ def train(config_path: str):
             min_confidence=mm["min_confidence"],
             compression_threshold=mm["compression_threshold"],
             top_k=mm["top_k"],
+            use_learned_fingerprint=mm.get("use_learned_fingerprint", True),
         ),
     )
 
@@ -199,13 +200,12 @@ def train(config_path: str):
             torch.nn.utils.clip_grad_norm_(system.parameters(), tc["grad_clip"])
             optimizer.step()
 
-            # Store experience: query fingerprint + correct answer token
-            confidence   = float(torch.exp(-loss).item())
-            answer_token = extract_answer_token(target_ids.cpu())
-            system.remember(
+            # Store supervised experiences for every batch item. The answer token
+            # comes from the dataset, so it should not be gated by current model loss.
+            answer_tokens = extract_answer_tokens(target_ids.cpu())
+            system.remember_batch(
                 query_fp_np=query_fp_np,
-                answer_token=answer_token,
-                confidence=confidence,
+                answer_tokens=answer_tokens,
             )
 
             system.step_housekeeping()

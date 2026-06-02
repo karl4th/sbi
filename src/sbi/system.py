@@ -44,10 +44,13 @@ class SBISystem(nn.Module):
         self.config = config
 
         self.reasoning_core = ReasoningCore(config.reasoning)
-        self.fingerprint_layer = StateFingerprintLayer(
-            hidden_dim=config.reasoning.hidden_dim,
-            fingerprint_dim=config.memory.fingerprint_dim,
-        )
+        if config.memory.use_learned_fingerprint:
+            self.fingerprint_layer = StateFingerprintLayer(
+                hidden_dim=config.reasoning.hidden_dim,
+                fingerprint_dim=config.memory.fingerprint_dim,
+            )
+        else:
+            self.fingerprint_layer = None
         self.memory_injection = MemoryInjectionLayer(
             fingerprint_dim=config.memory.fingerprint_dim,
             d_model=config.reasoning.d_model,
@@ -84,18 +87,17 @@ class SBISystem(nn.Module):
             query_fp_np:  (B, fingerprint_dim) — fingerprint of the INPUT query,
                           used for storing in memory (not the output state).
         """
-        B = input_ids.shape[0]
-
         # Pass 1 — no grad, get query fingerprint for the current input
         with torch.no_grad():
-            _, hidden_nograd = self.reasoning_core(input_ids, return_hidden_state=True)
-            query_fp = self.fingerprint_layer(hidden_nograd)
+            if self.fingerprint_layer is None:
+                query_fp = self._input_fingerprint(input_ids)
+            else:
+                _, hidden_nograd = self.reasoning_core(input_ids, return_hidden_state=True)
+                query_fp = self.fingerprint_layer(hidden_nograd)
             query_fp_np = query_fp.cpu().numpy()
 
-        # Retrieve memories relevant to this input
+        # Retrieve memories relevant to each input in the batch.
         memory_tokens = self._build_memory_tokens(query_fp_np, input_ids.device)
-        if memory_tokens is not None:
-            memory_tokens = memory_tokens.expand(B, -1, -1)
 
         # Pass 2 — full forward with memory context, gradients flow here
         logits, _ = self.reasoning_core(
@@ -121,26 +123,55 @@ class SBISystem(nn.Module):
         if self.episodic_memory.size() == 0:
             return None
 
-        # top_k=1: only the single most similar entry.
-        # More hints = more noise when fingerprints are imperfect.
-        entries = self.episodic_memory.search(
-            query_fp_np[0], top_k=1, min_similarity=0.5
-        )
-        if not entries:
+        memory_vectors = []
+        any_hit = False
+
+        for query_fp in query_fp_np:
+            # top_k=1: only the single most similar entry.
+            # More hints = more noise when fingerprints are imperfect.
+            entries = self.episodic_memory.search(
+                query_fp, top_k=1, min_similarity=0.5
+            )
+            if not entries or entries[0].answer_token < 0:
+                memory_vectors.append(
+                    torch.zeros(
+                        self.config.reasoning.d_model,
+                        dtype=self.reasoning_core.token_emb.weight.dtype,
+                        device=device,
+                    )
+                )
+                continue
+
+            any_hit = True
+            entry = entries[0]
+
+            # Hebbian update only on confident retrievals (not every step)
+            if entry.confidence > 0.75:
+                self.search_layer.record_coactivation(entries)
+
+            ans_tensor = torch.tensor([entry.answer_token], dtype=torch.long, device=device)
+            memory_vectors.append(self.reasoning_core.token_emb(ans_tensor).squeeze(0))
+
+        if not any_hit:
             return None
 
-        entry = entries[0]
-        if entry.answer_token < 0:
-            return None
+        return torch.stack(memory_vectors, dim=0).unsqueeze(1)   # (B, 1, d_model)
 
-        # Hebbian update only on confident retrievals (not every step)
-        if entry.confidence > 0.75:
-            self.search_layer.record_coactivation(entries)
+    def _input_fingerprint(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Deterministic diagnostic address for memory.
 
-        ans_tensor = torch.tensor([entry.answer_token], dtype=torch.long, device=device)
-        mem_vector = self.reasoning_core.token_emb(ans_tensor)   # (1, d_model)
-
-        return mem_vector.unsqueeze(0)   # (1, 1, d_model)
+        This bypasses the learned fingerprint layer so memory behavior can be
+        tested independently. It hashes token IDs into fingerprint_dim bins and
+        L2-normalizes the bag-of-tokens vector for cosine search.
+        """
+        B = input_ids.shape[0]
+        F = self.config.memory.fingerprint_dim
+        mask = (input_ids != 0).to(dtype=self.reasoning_core.token_emb.weight.dtype)
+        bins = torch.remainder(input_ids, F)
+        fp = torch.zeros(B, F, dtype=mask.dtype, device=input_ids.device)
+        fp.scatter_add_(1, bins, mask)
+        return nn.functional.normalize(fp, p=2, dim=-1)
 
     def remember(
         self,
@@ -154,15 +185,33 @@ class SBISystem(nn.Module):
         """
         if confidence < self.config.memory.min_confidence:
             return
+        state_signature = query_fp_np if query_fp_np.ndim == 1 else query_fp_np[0]
 
         entry = MemoryEntry(
-            state_signature=query_fp_np[0],
+            state_signature=state_signature,
             action="reasoning",
             outcome="correct" if confidence > 0.8 else "partial",
             confidence=confidence,
             answer_token=answer_token,
         )
         self.episodic_memory.write(entry)
+
+    def remember_batch(
+        self,
+        query_fp_np: np.ndarray,
+        answer_tokens: List[int],
+        confidences: Optional[List[float]] = None,
+    ):
+        """Store one supervised memory entry per batch item."""
+        if confidences is None:
+            confidences = [1.0] * len(answer_tokens)
+
+        for query_fp, answer_token, confidence in zip(
+            query_fp_np, answer_tokens, confidences
+        ):
+            if answer_token < 0:
+                continue
+            self.remember(query_fp, answer_token, confidence)
 
     def retrieve(self, query_fp_np: np.ndarray) -> List[MemoryEntry]:
         entries = self.search_layer.search(query_fp_np[0])
