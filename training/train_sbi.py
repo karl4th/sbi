@@ -48,6 +48,10 @@ def evaluate(system: SBISystem, loader: DataLoader, device: torch.device) -> dic
     total_answer_tokens = 0
     retrieval_hits = 0
     retrieval_queries = 0
+    memory_answer_correct = 0
+    memory_answer_total = 0
+    similarity_sum = 0.0
+    wrong_examples = []
 
     with torch.no_grad():
         for input_ids, target_ids in loader:
@@ -70,16 +74,35 @@ def evaluate(system: SBISystem, loader: DataLoader, device: torch.device) -> dic
             total_answer_tokens += mask.sum().item()
 
             if system.episodic_memory.size() > 0:
-                for sample_fp in query_fp:
-                    entries = system.episodic_memory.search(sample_fp, top_k=1)
-                    retrieval_hits += int(bool(entries))
+                true_answers = extract_answer_tokens(target_ids.cpu())
+                memory_answers, similarities = system.retrieve_answer_tokens(query_fp)
+                for mem_answer, true_answer, similarity in zip(
+                    memory_answers, true_answers, similarities
+                ):
                     retrieval_queries += 1
+                    if mem_answer < 0:
+                        continue
+                    retrieval_hits += 1
+                    memory_answer_total += int(true_answer >= 0)
+                    memory_answer_correct += int(mem_answer == true_answer)
+                    similarity_sum += similarity
+                    if (
+                        mem_answer != true_answer
+                        and true_answer >= 0
+                        and len(wrong_examples) < 5
+                    ):
+                        wrong_examples.append((mem_answer, true_answer, similarity))
 
     system.train()
+    memory_answer_acc = memory_answer_correct / max(1, memory_answer_total)
+    avg_similarity = similarity_sum / max(1, retrieval_hits)
     return {
         "eval_loss":      total_loss / max(1, n_batches),
         "answer_acc":     correct / max(1, total_answer_tokens),
         "retrieval_rate": retrieval_hits / max(1, retrieval_queries),
+        "memory_answer_acc": memory_answer_acc,
+        "memory_avg_similarity": avg_similarity,
+        "memory_wrong_examples": wrong_examples,
         **system.memory_stats(),
     }
 
@@ -178,6 +201,8 @@ def train(config_path: str):
 
     step = 0
     best_eval_loss = float("inf")
+    last_memory_answer_acc = 0.0
+    last_memory_avg_similarity = 0.0
 
     system.train()
     pbar = tqdm(total=tc["max_steps"])
@@ -224,19 +249,27 @@ def train(config_path: str):
                 loss=f"{loss.item():.4f}",
                 mem=stats["memory_size"],
                 edges=stats["graph_edges"],
+                mem_acc=f"{last_memory_answer_acc:.2%}",
+                sim=f"{last_memory_avg_similarity:.2f}",
             )
             pbar.update(1)
 
             if step % tc["eval_every"] == 0:
                 metrics = evaluate(system, eval_loader, device)
+                last_memory_answer_acc = metrics["memory_answer_acc"]
+                last_memory_avg_similarity = metrics["memory_avg_similarity"]
                 print(
                     f"\n[step {step}] "
                     f"loss={metrics['eval_loss']:.4f}  "
                     f"acc={metrics['answer_acc']:.4f}  "
                     f"retrieval={metrics['retrieval_rate']:.2%}  "
+                    f"mem_ans_acc={metrics['memory_answer_acc']:.2%}  "
+                    f"mem_sim={metrics['memory_avg_similarity']:.3f}  "
                     f"mem={metrics['memory_size']}  "
                     f"edges={metrics['graph_edges']}"
                 )
+                if metrics["memory_wrong_examples"]:
+                    print("  wrong memory examples (pred,true,sim):", metrics["memory_wrong_examples"])
                 if metrics["eval_loss"] < best_eval_loss:
                     best_eval_loss = metrics["eval_loss"]
                     torch.save(

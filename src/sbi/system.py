@@ -172,6 +172,38 @@ class SBISystem(nn.Module):
             torch.tensor(answer_tokens, dtype=torch.long, device=device),
         )
 
+    def retrieve_answer_tokens(
+        self,
+        query_fp_np: np.ndarray,
+        top_k: int = 1,
+        min_similarity: float = 0.5,
+    ) -> Tuple[List[int], List[float]]:
+        """
+        Diagnostic retrieval: return best answer token and cosine score per query.
+
+        This does not mutate usage counts or the Hebbian graph, so it is safe for
+        eval logging.
+        """
+        if self.episodic_memory.size() == 0:
+            return [-1] * len(query_fp_np), [0.0] * len(query_fp_np)
+
+        answer_tokens: List[int] = []
+        similarities: List[float] = []
+        for query_fp in query_fp_np:
+            entries, scores = self.episodic_memory.search_with_scores(
+                query_fp,
+                top_k=top_k,
+                min_similarity=min_similarity,
+                update_usage=False,
+            )
+            if not entries:
+                answer_tokens.append(-1)
+                similarities.append(0.0)
+                continue
+            answer_tokens.append(entries[0].answer_token)
+            similarities.append(scores[0])
+        return answer_tokens, similarities
+
     def _apply_memory_logit_bias(
         self,
         input_ids: torch.Tensor,

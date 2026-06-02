@@ -55,20 +55,39 @@ class EpisodicMemory:
         Retrieve top_k most similar memory entries above min_similarity threshold.
         Returns [] when no entry is similar enough — caller must handle this.
         """
+        entries, _scores = self.search_with_scores(
+            query_signature,
+            top_k=top_k,
+            min_similarity=min_similarity,
+            update_usage=True,
+        )
+        return entries
+
+    def search_with_scores(
+        self,
+        query_signature: np.ndarray,
+        top_k: int = 8,
+        min_similarity: float = 0.5,
+        update_usage: bool = True,
+    ) -> tuple[List[MemoryEntry], List[float]]:
+        """Retrieve entries with cosine similarities."""
         if len(self.entries) == 0:
-            return []
+            return [], []
 
         k = min(top_k, len(self.entries))
         vec = self._normalize(query_signature).reshape(1, -1).astype(np.float32)
         scores, indices = self.index.search(vec, k)
 
         results = []
+        result_scores = []
         for score, idx in zip(scores[0], indices[0]):
             if idx >= 0 and score >= min_similarity:
                 entry = self.entries[idx]
-                entry.usage_count += 1
+                if update_usage:
+                    entry.usage_count += 1
                 results.append(entry)
-        return results
+                result_scores.append(float(score))
+        return results, result_scores
 
     def reinforce(self, entry_id: int, delta: float = 0.05):
         """Boost confidence of a memory that proved useful."""
