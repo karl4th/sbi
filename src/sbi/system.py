@@ -121,26 +121,26 @@ class SBISystem(nn.Module):
         if self.episodic_memory.size() == 0:
             return None
 
-        entries = self.search_layer.search(query_fp_np[0])
+        # top_k=1: only the single most similar entry.
+        # More hints = more noise when fingerprints are imperfect.
+        entries = self.episodic_memory.search(
+            query_fp_np[0], top_k=1, min_similarity=0.5
+        )
         if not entries:
             return None
 
-        self.search_layer.record_coactivation(entries)
+        entry = entries[0]
+        if entry.answer_token < 0:
+            return None
 
-        # Fingerprint projections — (K, d_model)
-        fp_array = np.stack([e.state_signature for e in entries])
-        fp_tensor = torch.tensor(fp_array, dtype=torch.float32, device=device)
-        mem_vectors = self.memory_injection(fp_tensor)
+        # Hebbian update only on confident retrievals (not every step)
+        if entry.confidence > 0.75:
+            self.search_layer.record_coactivation(entries)
 
-        # Answer hint embeddings — inject answer tokens from retrieved memories
-        answer_ids = [e.answer_token for e in entries if e.answer_token >= 0]
-        if answer_ids:
-            ans_tensor = torch.tensor(answer_ids, dtype=torch.long, device=device)
-            # Reuse the transformer's own token embedding — same semantic space
-            ans_embs = self.reasoning_core.token_emb(ans_tensor)   # (num_hints, d_model)
-            mem_vectors = torch.cat([mem_vectors, ans_embs], dim=0)
+        ans_tensor = torch.tensor([entry.answer_token], dtype=torch.long, device=device)
+        mem_vector = self.reasoning_core.token_emb(ans_tensor)   # (1, d_model)
 
-        return mem_vectors.unsqueeze(0)   # (1, K + num_hints, d_model)
+        return mem_vector.unsqueeze(0)   # (1, 1, d_model)
 
     def remember(
         self,

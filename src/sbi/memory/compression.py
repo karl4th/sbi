@@ -68,10 +68,19 @@ class MetaStateCompressor:
 
     def _merge(self, entries: List[MemoryEntry]) -> MemoryEntry:
         """Create a single MetaState from a cluster of entries."""
+        from collections import Counter
+
         signatures = np.stack([e.state_signature for e in entries])
         centroid = signatures.mean(axis=0)
 
-        best = max(entries, key=lambda e: e.confidence * e.usage_count)
+        best = max(entries, key=lambda e: e.confidence * (1 + e.usage_count))
+
+        # Majority vote on answer_token — most common answer in the cluster wins.
+        # Without this, answer_token is lost after compression and hints stop working.
+        answer_votes = Counter(
+            e.answer_token for e in entries if e.answer_token >= 0
+        )
+        dominant_answer = answer_votes.most_common(1)[0][0] if answer_votes else -1
 
         return MemoryEntry(
             state_signature=centroid,
@@ -80,4 +89,5 @@ class MetaStateCompressor:
             confidence=float(np.mean([e.confidence for e in entries])),
             usage_count=sum(e.usage_count for e in entries),
             entry_id=best.entry_id,
+            answer_token=dominant_answer,
         )

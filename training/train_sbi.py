@@ -139,6 +139,23 @@ def train(config_path: str):
     system = SBISystem(sbi_config).to(device)
     print(f"Parameters: {system.num_parameters():,}")
 
+    # Initialize Reasoning Core from trained baseline.
+    # This solves the cold start problem: fingerprints are immediately meaningful
+    # because the reasoning core already knows how to encode bAbI tasks.
+    baseline_ckpt = "experiments/checkpoints/baseline_best.pt"
+    if os.path.exists(baseline_ckpt):
+        ckpt = torch.load(baseline_ckpt, map_location=device)
+        baseline_state = ckpt["model_state"]
+        # Load only the reasoning core weights (keys without "reasoning_core." prefix)
+        core_state = {
+            k.replace("reasoning_core.", ""): v
+            for k, v in baseline_state.items()
+        }
+        missing, unexpected = system.reasoning_core.load_state_dict(core_state, strict=False)
+        print(f"Loaded baseline into reasoning core. Missing: {len(missing)}, Unexpected: {len(unexpected)}")
+    else:
+        print(f"WARNING: baseline checkpoint not found at {baseline_ckpt}. Training from scratch.")
+
     tc  = cfg["training"]
     train_loader = DataLoader(train_dataset, batch_size=tc["batch_size"], shuffle=True, num_workers=2)
     eval_loader  = DataLoader(eval_dataset,  batch_size=tc["batch_size"], num_workers=2)

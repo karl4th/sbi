@@ -45,18 +45,26 @@ class EpisodicMemory:
         self.entries.append(entry)
         return entry.entry_id
 
-    def search(self, query_signature: np.ndarray, top_k: int = 8) -> List[MemoryEntry]:
-        """Retrieve the top_k most similar memory entries to the query state."""
+    def search(
+        self,
+        query_signature: np.ndarray,
+        top_k: int = 8,
+        min_similarity: float = 0.5,
+    ) -> List[MemoryEntry]:
+        """
+        Retrieve top_k most similar memory entries above min_similarity threshold.
+        Returns [] when no entry is similar enough — caller must handle this.
+        """
         if len(self.entries) == 0:
             return []
 
         k = min(top_k, len(self.entries))
         vec = self._normalize(query_signature).reshape(1, -1).astype(np.float32)
-        _, indices = self.index.search(vec, k)
+        scores, indices = self.index.search(vec, k)
 
         results = []
-        for idx in indices[0]:
-            if idx >= 0:
+        for score, idx in zip(scores[0], indices[0]):
+            if idx >= 0 and score >= min_similarity:
                 entry = self.entries[idx]
                 entry.usage_count += 1
                 results.append(entry)
