@@ -127,10 +127,12 @@ class SBISystem(nn.Module):
         any_hit = False
 
         for query_fp in query_fp_np:
-            # top_k=1: only the single most similar entry.
-            # More hints = more noise when fingerprints are imperfect.
+            # Retrieve several neighbors so Hebbian co-activation can form edges.
+            # Only the best entry is injected below to keep the hint low-noise.
             entries = self.episodic_memory.search(
-                query_fp, top_k=1, min_similarity=0.5
+                query_fp,
+                top_k=self.config.memory.top_k,
+                min_similarity=0.5,
             )
             if not entries or entries[0].answer_token < 0:
                 memory_vectors.append(

@@ -18,6 +18,8 @@ memory:
   use_learned_fingerprint: false
 
 training:
+  init_from_baseline: false
+  baseline_checkpoint: experiments/checkpoints/baseline_best.pt
   batch_size: 64
   learning_rate: 3.0e-4
   weight_decay: 0.1
@@ -34,4 +36,4 @@ data:
 
 logging:
   log_every: 50
-  experiment_name: sbi_100m
+  experiment_name: sbi_scratch
