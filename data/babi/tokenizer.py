@@ -18,8 +18,9 @@ VOCAB_OFFSET = 5
 
 
 def _tokenize(text: str) -> List[str]:
-    """Split on whitespace, lowercase, keep punctuation attached."""
-    return re.findall(r"[a-zA-Z]+|[?.!,]|ANSWER", text.lower())
+    """Split into word tokens, lowercase everything except the ANSWER sentinel."""
+    tokens = re.findall(r"[a-zA-Z]+|[?.!,]", text)
+    return ["ANSWER" if t == "ANSWER" else t.lower() for t in tokens]
 
 
 class BabiTokenizer:

@@ -36,9 +36,6 @@ class MultiHeadAttention(nn.Module):
         out = (attn @ v).transpose(1, 2).contiguous().view(B, T, C)
         return self.out_proj(out)
 
-    # type hint declared in-class now that Optional is imported at top
-    forward.__annotations__["mask"] = Optional[torch.Tensor]
-
 
 class FeedForward(nn.Module):
     def __init__(self, d_model: int, d_ff: int, dropout: float):

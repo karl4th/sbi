@@ -15,11 +15,11 @@ from datasets import load_dataset
 
 
 TASK_NAMES = {
-    1: "qa1_single-supporting-fact",
-    2: "qa2_two-supporting-facts",
-    3: "qa3_three-supporting-facts",
-    15: "qa15_basic-deduction",
-    16: "qa16_basic-induction",
+    1:  "en-10k-qa1",
+    2:  "en-10k-qa2",
+    3:  "en-10k-qa3",
+    15: "en-10k-qa15",
+    16: "en-10k-qa16",
 }
 
 

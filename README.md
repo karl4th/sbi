@@ -88,7 +88,8 @@ sbi/
 ### Local
 
 ```bash
-# Install dependencies
+git clone https://github.com/karl4th/sbi.git
+cd sbi
 pip install -r requirements.txt
 
 # Train baseline

@@ -71,16 +71,19 @@ class BabiDataset(Dataset):
     def _mask_before_answer(
         self, input_ids: List[int], target_ids: List[int]
     ) -> List[int]:
-        """Replace target with PAD_ID for all positions up to and including ANSWER token."""
+        """
+        Mask target positions up to (but NOT including) the ANSWER token.
+        Position i where input[i]=ANSWER has target[i]=answer_word — that is
+        exactly what we want the model to predict, so we must NOT mask it.
+        """
         masked = list(target_ids)
         found_answer = False
         for i, tok in enumerate(input_ids):
             if tok == ANSWER_ID:
                 found_answer = True
-                masked[i] = PAD_ID  # also mask the ANSWER token itself
+                # Position i onward: keep as-is (answer word + EOS)
                 break
             masked[i] = PAD_ID
-        # if no ANSWER token found, mask everything (shouldn't happen)
         if not found_answer:
             masked = [PAD_ID] * len(masked)
         return masked
