@@ -106,25 +106,44 @@ class ReasoningCore(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
+        memory_tokens: Optional[torch.Tensor] = None,
         return_hidden_state: bool = False,
     ):
+        """
+        Args:
+            input_ids:     (B, T)
+            memory_tokens: (B, K, d_model) — retrieved memory vectors prepended
+                           as context tokens. No positional embeddings needed;
+                           the causal mask lets the model attend to them freely.
+            return_hidden_state: also return mean-pooled hidden state
+        """
         B, T = input_ids.shape
         assert T <= self.config.max_seq_len
 
         positions = torch.arange(T, device=input_ids.device).unsqueeze(0)
         x = self.drop(self.token_emb(input_ids) + self.pos_emb(positions))
 
-        # Causal mask
-        mask = torch.tril(torch.ones(T, T, device=input_ids.device)).unsqueeze(0).unsqueeze(0)
+        if memory_tokens is not None:
+            K = memory_tokens.shape[1]
+            x = torch.cat([memory_tokens, x], dim=1)   # (B, K+T, d_model)
+        else:
+            K = 0
+
+        T_full = K + T
+        mask = torch.tril(torch.ones(T_full, T_full, device=input_ids.device)).unsqueeze(0).unsqueeze(0)
 
         for block in self.blocks:
             x = block(x, mask)
 
         hidden = self.ln_f(x)
+
+        # Discard memory positions — only compute logits over the original T tokens
+        if K > 0:
+            hidden = hidden[:, K:, :]
+
         logits = self.lm_head(hidden)
 
         if return_hidden_state:
-            # Return mean-pooled hidden state as the "reasoning state"
             return logits, hidden.mean(dim=1)
 
         return logits

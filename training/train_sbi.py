@@ -1,6 +1,9 @@
 """
-Train the SBI system: Reasoning Core + State Fingerprint + Memory.
+Train the SBI system: Reasoning Core + State Fingerprint + Memory Injection.
 Compared against the baseline to validate H1 and H2.
+
+Key difference from baseline: retrieved memory fingerprints are projected and
+prepended as context tokens before the transformer forward pass (lag-1 retrieval).
 """
 
 import sys
@@ -34,12 +37,16 @@ def evaluate(system: SBISystem, loader: DataLoader, device: torch.device) -> dic
     total_answer_tokens = 0
     retrieval_hits = 0
 
+    prev_fp = None
+
     with torch.no_grad():
         for input_ids, target_ids in loader:
             input_ids = input_ids.to(device)
             target_ids = target_ids.to(device)
 
-            logits, fp_numpy = system(input_ids)
+            logits, fp_numpy = system(input_ids, prev_fingerprint=prev_fp)
+            prev_fp = fp_numpy
+
             loss = nn.functional.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 target_ids.view(-1),
@@ -53,10 +60,10 @@ def evaluate(system: SBISystem, loader: DataLoader, device: torch.device) -> dic
             correct += ((preds == target_ids) & mask).sum().item()
             total_answer_tokens += mask.sum().item()
 
-            # Check memory retrieval activity
-            entries = system.retrieve(fp_numpy)
-            if entries:
-                retrieval_hits += 1
+            if system.episodic_memory.size() > 0 and prev_fp is not None:
+                entries = system.episodic_memory.search(prev_fp[0], top_k=1)
+                if entries:
+                    retrieval_hits += 1
 
     system.train()
     return {
@@ -124,7 +131,7 @@ def train(config_path: str):
 
     tc = cfg["training"]
     train_loader = DataLoader(train_dataset, batch_size=tc["batch_size"], shuffle=True, num_workers=2)
-    eval_loader = DataLoader(eval_dataset, batch_size=tc["batch_size"], num_workers=2)
+    eval_loader  = DataLoader(eval_dataset,  batch_size=tc["batch_size"], num_workers=2)
 
     optimizer = torch.optim.AdamW(
         system.parameters(), lr=tc["learning_rate"], weight_decay=tc["weight_decay"]
@@ -135,6 +142,7 @@ def train(config_path: str):
 
     step = 0
     best_eval_loss = float("inf")
+    prev_fp = None          # lag-1 fingerprint for memory injection
 
     system.train()
     pbar = tqdm(total=tc["max_steps"])
@@ -148,10 +156,12 @@ def train(config_path: str):
             for g in optimizer.param_groups:
                 g["lr"] = lr
 
-            input_ids = input_ids.to(device)
+            input_ids  = input_ids.to(device)
             target_ids = target_ids.to(device)
 
-            logits, fp_numpy = system(input_ids)
+            # Forward with memory context from previous step
+            logits, fp_numpy = system(input_ids, prev_fingerprint=prev_fp)
+
             loss = nn.functional.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 target_ids.view(-1),
@@ -163,15 +173,17 @@ def train(config_path: str):
             torch.nn.utils.clip_grad_norm_(system.parameters(), tc["grad_clip"])
             optimizer.step()
 
-            # Write experience: confidence = exp(-loss) as a proxy
+            # Update lag-1 fingerprint for next step
+            prev_fp = fp_numpy
+
+            # Write to episodic memory if confident enough
             confidence = float(torch.exp(-loss).item())
-            if confidence >= sbi_config.memory.min_confidence:
-                system.remember(
-                    fingerprint=fp_numpy,
-                    action=f"step_{step}",
-                    outcome="correct" if confidence > 0.8 else "partial",
-                    confidence=confidence,
-                )
+            system.remember(
+                fingerprint=fp_numpy,
+                action=f"step_{step}",
+                outcome="correct" if confidence > 0.8 else "partial",
+                confidence=confidence,
+            )
 
             system.step_housekeeping()
 
