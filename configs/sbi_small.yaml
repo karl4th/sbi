@@ -33,6 +33,8 @@ data:
   task_ids: [1, 2, 3]
   max_seq_len: 256
   size_per_task: null
+  data_dir: null
+  allow_synthetic_fallback: false
 
 logging:
   log_every: 50

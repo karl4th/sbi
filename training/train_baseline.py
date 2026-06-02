@@ -89,12 +89,16 @@ def train(config_path: str):
         split="train",
         max_seq_len=dc["max_seq_len"],
         size_per_task=dc.get("size_per_task"),
+        data_dir=dc.get("data_dir"),
+        allow_synthetic_fallback=dc.get("allow_synthetic_fallback", False),
     )
     eval_dataset = BabiDataset(
         task_ids=dc["task_ids"],
         split="test",
         tokenizer=train_dataset.tokenizer,   # share vocab
         max_seq_len=dc["max_seq_len"],
+        data_dir=dc.get("data_dir"),
+        allow_synthetic_fallback=dc.get("allow_synthetic_fallback", False),
     )
 
     vocab_size = train_dataset.vocab_size

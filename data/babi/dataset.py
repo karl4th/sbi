@@ -33,6 +33,9 @@ class BabiDataset(Dataset):
         split:      "train" or "test"
         tokenizer:  pass a pre-built tokenizer (e.g. built on train split)
         max_seq_len: max token length
+        data_dir: optional local Kaggle dataset root
+        allow_synthetic_fallback: whether to use generated examples if real
+            Kaggle bAbI files are unavailable
     """
 
     def __init__(
@@ -42,9 +45,17 @@ class BabiDataset(Dataset):
         tokenizer: Optional[BabiTokenizer] = None,
         max_seq_len: int = 256,
         size_per_task: Optional[int] = None,
+        data_dir: Optional[str] = None,
+        allow_synthetic_fallback: bool = False,
     ):
         self.max_seq_len = max_seq_len
-        self.examples = load_babi_tasks(task_ids, split=split, size_per_task=size_per_task)
+        self.examples = load_babi_tasks(
+            task_ids,
+            split=split,
+            size_per_task=size_per_task,
+            data_dir=data_dir,
+            allow_synthetic_fallback=allow_synthetic_fallback,
+        )
 
         if tokenizer is None:
             self.tokenizer = build_tokenizer(self.examples)

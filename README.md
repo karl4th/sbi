@@ -67,8 +67,12 @@ sbi/
 │   │   ├── fingerprint.py     # State Fingerprint Layer
 │   │   └── search_layer.py    # Full search procedure
 │   └── system.py              # SBISystem — main entry point
+├── data/babi/
+│   ├── loader.py              # Kaggle English bAbI loader
+│   ├── dataset.py             # PyTorch dataset wrapper
+│   └── tokenizer.py           # Word-level tokenizer
 ├── data/tasks/
-│   └── generator.py           # Synthetic reasoning task generator
+│   └── generator.py           # Synthetic fallback generators
 ├── training/
 │   ├── train_baseline.py      # Train transformer without memory
 │   ├── train_sbi.py           # Train full SBI system
@@ -92,14 +96,19 @@ git clone https://github.com/karl4th/sbi.git
 cd sbi
 pip install -r requirements.txt
 
-# Train baseline
-python training/train_baseline.py --config configs/baseline.yaml
+# Optional: use a local Kaggle bAbI download instead of kagglehub cache
+export BABI_DATA_DIR=/path/to/the-babi-tasks-for-nlp-qa-system
 
-# Train SBI
-python training/train_sbi.py --config configs/sbi_small.yaml
+# Train baseline
+python3 training/train_baseline.py --config configs/baseline.yaml
+
+# Train SBI from scratch
+python3 training/train_sbi.py --config configs/sbi_small.yaml
 
 # Compare
-python training/evaluate.py
+python3 training/evaluate.py \
+  --baseline experiments/checkpoints/baseline_best.pt \
+  --sbi experiments/checkpoints/sbi_scratch_best.pt
 ```
 
 ### Google Colab
@@ -112,10 +121,10 @@ Open `notebooks/01_sbi_colab.ipynb` in Colab with GPU (A100 recommended).
 
 **Experimental:** Same 100M Transformer + State Fingerprint + Episodic Memory + Hebbian Graph + Search Layer
 
-**Tasks:** Synthetic reasoning (no world knowledge required)
-- Logic chains — multi-step deductive reasoning
-- Analogies — structural pattern completion
-- Planning sequences — reach goal through minimal operations
+**Tasks:** English Facebook bAbI QA tasks from Kaggle
+- Task 1 — single supporting fact
+- Task 2 — two supporting facts
+- Task 3 — three supporting facts
 
 **Metrics:**
 - Task accuracy (primary)
@@ -141,6 +150,7 @@ Open `notebooks/01_sbi_colab.ipynb` in Colab with GPU (A100 recommended).
 
 - PyTorch ≥ 2.0
 - FAISS (CPU or GPU)
+- KaggleHub
 - NetworkX
 - scikit-learn (for Meta-State compression)
 
