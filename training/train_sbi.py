@@ -42,6 +42,7 @@ def extract_answer_tokens(target_ids: torch.Tensor) -> list[int]:
 
 def evaluate(system: SBISystem, loader: DataLoader, device: torch.device) -> dict:
     system.eval()
+    tokenizer = getattr(loader.dataset, "tokenizer", None)
     total_loss = 0.0
     n_batches = 0
     correct = 0
@@ -91,7 +92,16 @@ def evaluate(system: SBISystem, loader: DataLoader, device: torch.device) -> dic
                         and true_answer >= 0
                         and len(wrong_examples) < 5
                     ):
-                        wrong_examples.append((mem_answer, true_answer, similarity))
+                        if tokenizer is None:
+                            wrong_examples.append((mem_answer, true_answer, similarity))
+                        else:
+                            wrong_examples.append(
+                                (
+                                    tokenizer.id2word.get(mem_answer, "<unk>"),
+                                    tokenizer.id2word.get(true_answer, "<unk>"),
+                                    round(similarity, 4),
+                                )
+                            )
 
     system.train()
     memory_answer_acc = memory_answer_correct / max(1, memory_answer_total)
