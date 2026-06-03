@@ -208,11 +208,14 @@ def train(config_path: str):
     os.makedirs("experiments/checkpoints", exist_ok=True)
     os.makedirs("experiments/results", exist_ok=True)
     experiment_name = cfg.get("logging", {}).get("experiment_name", "sbi")
+    log_every = cfg.get("logging", {}).get("log_every", 50)
 
     step = 0
     best_eval_loss = float("inf")
-    last_memory_answer_acc = 0.0
-    last_memory_avg_similarity = 0.0
+    last_eval_memory_answer_acc = 0.0
+    last_eval_memory_avg_similarity = 0.0
+    last_train_memory_answer_acc = 0.0
+    last_train_memory_avg_similarity = 0.0
 
     system.train()
     pbar = tqdm(total=tc["max_steps"])
@@ -228,15 +231,43 @@ def train(config_path: str):
 
             input_ids  = input_ids.to(device)
             target_ids = target_ids.to(device)
+            answer_tokens = extract_answer_tokens(target_ids.cpu())
 
             # Two-pass forward (pass 1 inside system.forward is no_grad)
             logits, query_fp_np = system(input_ids)
+
+            if system.episodic_memory.size() > 0 and step % log_every == 0:
+                memory_answers, similarities = system.retrieve_answer_tokens(query_fp_np)
+                hits = [
+                    (mem_answer, true_answer, similarity)
+                    for mem_answer, true_answer, similarity in zip(
+                        memory_answers, answer_tokens, similarities
+                    )
+                    if mem_answer >= 0 and true_answer >= 0
+                ]
+                if hits:
+                    last_train_memory_answer_acc = sum(
+                        int(mem_answer == true_answer)
+                        for mem_answer, true_answer, _similarity in hits
+                    ) / len(hits)
+                    last_train_memory_avg_similarity = sum(
+                        similarity for _mem_answer, _true_answer, similarity in hits
+                    ) / len(hits)
 
             loss = nn.functional.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 target_ids.view(-1),
                 ignore_index=PAD_ID,
             )
+            if not torch.isfinite(loss):
+                stats = system.memory_stats()
+                raise RuntimeError(
+                    "Non-finite SBI loss detected. "
+                    f"step={step} loss={loss.item()} "
+                    f"memory_size={stats['memory_size']} "
+                    f"graph_edges={stats['graph_edges']} "
+                    f"memory_logit_bias={system.config.memory.memory_logit_bias}"
+                )
 
             optimizer.zero_grad()
             loss.backward()
@@ -245,7 +276,6 @@ def train(config_path: str):
 
             # Store supervised experiences for every batch item. The answer token
             # comes from the dataset, so it should not be gated by current model loss.
-            answer_tokens = extract_answer_tokens(target_ids.cpu())
             system.remember_batch(
                 query_fp_np=query_fp_np,
                 answer_tokens=answer_tokens,
@@ -259,15 +289,16 @@ def train(config_path: str):
                 loss=f"{loss.item():.4f}",
                 mem=stats["memory_size"],
                 edges=stats["graph_edges"],
-                mem_acc=f"{last_memory_answer_acc:.2%}",
-                sim=f"{last_memory_avg_similarity:.2f}",
+                train_mem=f"{last_train_memory_answer_acc:.2%}",
+                eval_mem=f"{last_eval_memory_answer_acc:.2%}",
+                sim=f"{last_train_memory_avg_similarity:.2f}",
             )
             pbar.update(1)
 
             if step % tc["eval_every"] == 0:
                 metrics = evaluate(system, eval_loader, device)
-                last_memory_answer_acc = metrics["memory_answer_acc"]
-                last_memory_avg_similarity = metrics["memory_avg_similarity"]
+                last_eval_memory_answer_acc = metrics["memory_answer_acc"]
+                last_eval_memory_avg_similarity = metrics["memory_avg_similarity"]
                 print(
                     f"\n[step {step}] "
                     f"loss={metrics['eval_loss']:.4f}  "

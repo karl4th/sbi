@@ -234,53 +234,16 @@ class SBISystem(nn.Module):
         Deterministic diagnostic address for memory.
 
         This bypasses the learned fingerprint layer so memory behavior can be
-        tested independently. It hashes ordered token features into
-        fingerprint_dim bins and L2-normalizes the vector for cosine search.
+        tested independently. It hashes token IDs into fingerprint_dim bins and
+        L2-normalizes the bag-of-tokens vector for cosine search.
         """
         B = input_ids.shape[0]
         F = self.config.memory.fingerprint_dim
-        dtype = self.reasoning_core.token_emb.weight.dtype
-        tokens = input_ids.to(torch.long)
-        mask = (tokens != 0).to(dtype=dtype)
-        fp = torch.zeros(B, F, dtype=dtype, device=input_ids.device)
-
-        # Unigram identity with mild position signal.
-        pos = torch.arange(tokens.shape[1], device=input_ids.device).unsqueeze(0)
-        pos_weight = (1.0 + pos.to(dtype=dtype) / max(1, tokens.shape[1])).expand_as(mask)
-        self._scatter_hashed_features(fp, tokens + 31 * pos, mask * pos_weight)
-
-        # Ordered n-grams separate stories that contain the same words in
-        # different reasoning chains.
-        if tokens.shape[1] >= 2:
-            bigram_hash = tokens[:, :-1] * 131 + tokens[:, 1:] * 17 + pos[:, :-1] * 7
-            bigram_mask = mask[:, :-1] * mask[:, 1:]
-            self._scatter_hashed_features(fp, bigram_hash, 0.75 * bigram_mask)
-
-        if tokens.shape[1] >= 3:
-            trigram_hash = (
-                tokens[:, :-2] * 8191
-                + tokens[:, 1:-1] * 131
-                + tokens[:, 2:] * 17
-                + pos[:, :-2] * 13
-            )
-            trigram_mask = mask[:, :-2] * mask[:, 1:-1] * mask[:, 2:]
-            self._scatter_hashed_features(fp, trigram_hash, 0.5 * trigram_mask)
-
+        mask = (input_ids != 0).to(dtype=self.reasoning_core.token_emb.weight.dtype)
+        bins = torch.remainder(input_ids, F)
+        fp = torch.zeros(B, F, dtype=mask.dtype, device=input_ids.device)
+        fp.scatter_add_(1, bins, mask)
         return nn.functional.normalize(fp, p=2, dim=-1)
-
-    def _scatter_hashed_features(
-        self,
-        fp: torch.Tensor,
-        feature_hash: torch.Tensor,
-        weights: torch.Tensor,
-    ):
-        bins = torch.remainder(feature_hash, fp.shape[1])
-        signs = torch.where(
-            torch.remainder(feature_hash // fp.shape[1], 2) == 0,
-            torch.ones_like(weights),
-            -torch.ones_like(weights),
-        )
-        fp.scatter_add_(1, bins, weights * signs)
 
     def remember(
         self,
